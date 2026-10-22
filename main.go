@@ -100,6 +100,9 @@ func getEnv(key, fallback string) string {
 }
 
 func (a *App) registerRoutes(e *echo.Echo) {
+	// Echo 4.16 appends '*' literally; the slash is required to keep the
+	// registered path aligned with the access-control route allowlist.
+	e.Static("/static/", "static")
 	// Health check (used by offline sync heartbeat)
 	e.GET("/api/health", a.PilotHealth)
 	e.HEAD("/api/health", a.PilotHealth)
@@ -307,8 +310,6 @@ func main() {
 	e.Use(middleware.Recover())
 	e.Use(pilotAccess(cfg.PilotOrigin, cfg.PilotAdmins))
 	e.Use(middleware.BodyLimit(fmt.Sprintf("%dM", cfg.MaxUploadMB)))
-
-	e.Static("/static", "static")
 
 	// Service worker must be served from root for proper scope.
 	// Disable caching: a stale /sw.js at any edge means PWAs can't see

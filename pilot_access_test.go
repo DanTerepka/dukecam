@@ -90,3 +90,24 @@ func TestPilotMediaRequiresIdentity(t *testing.T) {
 		t.Fatalf("photo exposed without identity: %d", rec.Code)
 	}
 }
+
+func TestPilotStaticAssetsRemainAuthorizedAndLoadable(t *testing.T) {
+	e := echo.New()
+	e.Use(pilotAccess("https://pilot.example.test", []string{"dan@example.test"}))
+	app := &App{}
+	app.registerRoutes(e)
+	for _, login := range []string{"dan@example.test", ""} {
+		req := httptest.NewRequest("GET", "/static/js/upload-payload.js", nil)
+		req.Header.Set("Tailscale-User-Login", login)
+		req = req.WithContext(context.WithValue(req.Context(), pilotUnixConnectionKey{}, true))
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		want := 200
+		if login == "" {
+			want = 403
+		}
+		if rec.Code != want {
+			t.Fatalf("static asset login=%q got %d want %d", login, rec.Code, want)
+		}
+	}
+}
