@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
 	"image/png"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +71,8 @@ func ExtractEXIF(data []byte) EXIFData {
 // photo, and a generation of quality lost on every "original". Dimensions now
 // come from the image header and thumbnails render asynchronously.
 func ProcessUpload(data []byte) (*ProcessedImage, error) {
+	imageWorkGate <- struct{}{}
+	defer func() { <-imageWorkGate }()
 	// EXIF comes from the original bytes, before any transform.
 	exifData := ExtractEXIF(data)
 
@@ -124,6 +128,8 @@ func exifOrientation(data []byte) int {
 // MakeThumbFromBytes decodes an upload and writes its 400x400 thumbnail.
 // This is the expensive call — run it off the request path via ThumbQueue.
 func MakeThumbFromBytes(data []byte, thumbPath string, quality int) error {
+	imageWorkGate <- struct{}{}
+	defer func() { <-imageWorkGate }()
 	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
 	if err != nil {
 		return fmt.Errorf("decode: %w", err)
@@ -161,15 +167,76 @@ func SaveRaw(data []byte, path string) error {
 // FindFile locates a file in a date-organized directory tree.
 // Path pattern: {base}/{slug}/{YYYY}/{MM}/{DD}/{filename}
 func FindFile(basePath, slug, filename string) (string, error) {
-	pattern := filepath.Join(basePath, slug, "*", "*", "*", filename)
-	matches, err := filepath.Glob(pattern)
+	if !validProjectSlug(slug) || !validMediaFilename(filename) {
+		return "", fmt.Errorf("invalid media path")
+	}
+	root, err := filepath.Abs(basePath)
 	if err != nil {
 		return "", err
 	}
-	if len(matches) == 0 {
-		return "", fmt.Errorf("file not found: %s/%s", slug, filename)
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
 	}
-	return matches[0], nil
+	projectPath := filepath.Join(root, slug)
+	info, err := os.Lstat(projectPath)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("invalid project directory")
+	}
+	found := ""
+	err = filepath.WalkDir(projectPath, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == projectPath {
+			return nil
+		}
+		rel, err := filepath.Rel(projectPath, path)
+		if err != nil {
+			return err
+		}
+		parts := strings.Split(rel, string(filepath.Separator))
+		if entry.Type()&os.ModeSymlink != 0 {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if entry.IsDir() {
+			n := len(parts)
+			expected := 2
+			if n == 1 {
+				expected = 4
+			}
+			if n > 3 || len(entry.Name()) != expected || strings.IndexFunc(entry.Name(), func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if len(parts) == 4 && entry.Name() == filename && entry.Type().IsRegular() {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return err
+			}
+			contained, err := filepath.Rel(root, resolved)
+			if err != nil || contained == ".." || strings.HasPrefix(contained, ".."+string(filepath.Separator)) {
+				return fmt.Errorf("media escapes storage root")
+			}
+			found = resolved
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.SkipAll) {
+		return "", err
+	}
+	if found == "" {
+		return "", fmt.Errorf("file not found")
+	}
+	return found, nil
 }
 
 // RotateFile reads an image from disk, rotates it, saves it back, and regenerates the thumbnail.

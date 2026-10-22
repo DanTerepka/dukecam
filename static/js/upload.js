@@ -3,13 +3,13 @@
  * 
  * Bulletproof upload with:
  * - IndexedDB queue (survives browser close)
- * - Fallback direct upload if IndexedDB unavailable
+ * - Refuse capture queueing if durable storage is unavailable
  * - Automatic retry with exponential backoff
  * - Multi-file concurrent upload
  * - Progress tracking per file
  * - Offline detection & resume
  * - Visibility change detection (camera return fallback)
- * - Never blocks upload — worker optional
+ * - Only clear queued photos after a matching server acknowledgment
  */
 
 const DB_NAME = 'dukecam';
@@ -152,19 +152,20 @@ async function openDB() {
             };
         });
     } catch (err) {
-        console.error('[DukeCam] IndexedDB unavailable, using direct upload fallback');
+        console.error('[DukeCam] IndexedDB unavailable; retain originals and retry');
         dbAvailable = false;
         return null;
     }
 }
 
 function dbPut(item) {
-    if (!dbAvailable) return Promise.resolve();
+    if (!dbAvailable) return Promise.reject(new Error('Durable storage unavailable'));
     return new Promise((resolve, reject) => {
         try {
             const tx = db.transaction(STORE_NAME, 'readwrite');
             tx.objectStore(STORE_NAME).put(item);
             tx.oncomplete = () => resolve();
+            tx.onabort = () => reject(tx.error || new Error('Photo storage transaction aborted'));
             tx.onerror = (e) => { console.error('[DukeCam] dbPut error:', e.target.error); reject(e.target.error); };
         } catch (err) {
             console.error('[DukeCam] dbPut exception:', err);
@@ -173,8 +174,23 @@ function dbPut(item) {
     });
 }
 
+// A background upload may have acknowledged and deleted this photo while
+// the foreground request failed. Never recreate a successfully cleared item.
+function dbPutExisting(item) {
+    if (!dbAvailable) return Promise.reject(new Error('Durable storage unavailable'));
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.get(item.id);
+        req.onsuccess = () => { if (req.result) store.put(item); };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('Photo storage transaction aborted'));
+    });
+}
+
 function dbDelete(id) {
-    if (!dbAvailable) return Promise.resolve();
+    if (!dbAvailable) return Promise.reject(new Error('Durable storage unavailable'));
     return new Promise((resolve, reject) => {
         try {
             const tx = db.transaction(STORE_NAME, 'readwrite');
@@ -208,6 +224,11 @@ function dbGetPending() {
 // ─── Queue Management ────────────────────────────────────────────
 
 async function enqueueFiles(files, projectId, workerId, workerName, caption, tag, buildingId, unitId, scope) {
+    if (!dbAvailable) {
+        showToast('Photo storage unavailable. Keep your originals and retry after reopening the app.', 'error');
+        throw new Error('Durable photo storage unavailable');
+    }
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
     const total = files.length;
     console.log(`[DukeCam] enqueueFiles: ${total} files, project=${projectId}, worker=${workerId || workerName || 'none'}, tag=${tag}`);
     const batchId = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString());
@@ -279,17 +300,10 @@ async function enqueueFiles(files, projectId, workerId, workerName, caption, tag
         };
 
         try {
-            if (dbAvailable) {
-                await dbPut(item);
-                renderQueueItem(item);
-                enqueued++;
-                batchTracker.recordQueued(batchId);
-            } else {
-                renderQueueItem(item);
-                enqueued++;
-                batchTracker.recordQueued(batchId);
-                directUpload(item);
-            }
+            await dbPut(item);
+            renderQueueItem(item);
+            enqueued++;
+            batchTracker.recordQueued(batchId);
         } catch (err) {
             const name = (err && err.name) || '';
             const msg = (err && err.message) || String(err);
@@ -323,7 +337,7 @@ async function enqueueFiles(files, projectId, workerId, workerName, caption, tag
     }
 
     if (quotaFailures > 0) {
-        showToast(`Storage full — ${quotaFailures} photo${quotaFailures > 1 ? 's' : ''} dropped. Upload current batch first, then add more.`, 'error');
+        showToast(`Storage full — ${quotaFailures} photo${quotaFailures > 1 ? 's' : ''} could not be saved. Keep originals, upload queued photos, then retry.`, 'error');
         console.warn(`[DukeCam] ${quotaFailures} file(s) dropped by IndexedDB quota`);
     }
     if (readFailures > 0) {
@@ -340,6 +354,7 @@ async function enqueueFiles(files, projectId, workerId, workerName, caption, tag
         registerPhotoSync();
         processQueue();
     }
+    if (readFailures || quotaFailures) throw new Error('Some photos were not saved. Keep originals and retry.');
 }
 
 async function registerPhotoSync() {
@@ -370,7 +385,12 @@ async function processQueue() {
                 break;
             }
 
-            const pending = await dbGetPending();
+            const allPending = await dbGetPending();
+            const pending = allPending.filter(item => !item.nextAttemptAt || item.nextAttemptAt <= Date.now());
+            if (!pending.length && allPending.length) {
+                const next = Math.min(...allPending.map(item => item.nextAttemptAt));
+                setTimeout(processQueue, Math.max(100, next - Date.now()));
+            }
             console.log(`[DukeCam] processQueue: ${pending.length} pending`);
             if (pending.length === 0) break;
 
@@ -412,47 +432,17 @@ async function uploadItem(item) {
         item.retries++;
         if (item.retries >= MAX_RETRIES) {
             item.status = 'failed';
-            await dbPut(item);
+            await dbPutExisting(item);
             updateQueueItem(item.id, 'error', `Failed after ${MAX_RETRIES} attempts`);
             batchTracker.recordFailed(item.batchId);
             showToast(`Upload failed: ${item.fileName} — tap Retry`, 'error');
         } else {
             item.status = 'pending';
-            await dbPut(item);
             const delay = RETRY_BASE_MS * Math.pow(2, Math.min(item.retries - 1, 5));
+            item.nextAttemptAt = Date.now() + delay;
+            await dbPutExisting(item);
             updateQueueItem(item.id, 'retrying', `Retry ${item.retries}/${MAX_RETRIES} in ${Math.round(delay / 1000)}s...`);
-            await sleep(delay);
-        }
-    }
-}
-
-// ─── Upload (direct fallback, no IndexedDB) ──────────────────────
-
-async function directUpload(item) {
-    console.log(`[DukeCam] directUpload: ${item.fileName}`);
-    updateQueueItem(item.id, 'uploading', 'Uploading...');
-
-    let retries = 0;
-    while (retries < MAX_RETRIES) {
-        try {
-            const result = await doUpload(item);
-            console.log(`[DukeCam] Direct upload success: ${item.fileName} → id=${result.id}`);
-            updateQueueItem(item.id, 'done', '✓ Uploaded');
-            batchTracker.recordUploaded(item.batchId);
-            fadeOutQueueItem(item.id);
-            return;
-        } catch (err) {
-            retries++;
-            console.error(`[DukeCam] Direct upload attempt ${retries} failed:`, err);
-            if (retries >= MAX_RETRIES) {
-                updateQueueItem(item.id, 'error', `Failed after ${MAX_RETRIES} attempts`);
-                batchTracker.recordFailed(item.batchId);
-                showToast(`Upload failed: ${item.fileName}`, 'error');
-            } else {
-                const delay = RETRY_BASE_MS * Math.pow(2, Math.min(retries - 1, 5));
-                updateQueueItem(item.id, 'retrying', `Retry ${retries}/${MAX_RETRIES}...`);
-                await sleep(delay);
-            }
+            setTimeout(processQueue, delay);
         }
     }
 }
@@ -460,22 +450,7 @@ async function directUpload(item) {
 // ─── Shared upload logic (XHR) ───────────────────────────────────
 
 function doUpload(item) {
-    // item.blob may be a Blob/File (new code path) or an ArrayBuffer
-    // (legacy queue entries from before the streaming rewrite).
-    let blob;
-    if (item.blob instanceof Blob) {
-        blob = item.blob;
-    } else {
-        blob = new Blob([item.blob], { type: item.mimeType || 'image/jpeg' });
-    }
-    const formData = new FormData();
-    formData.append('file', blob, item.fileName || 'photo.jpg');
-    formData.append('project_id', item.projectId);
-    if (item.workerId) formData.append('worker_id', item.workerId);
-    if (item.workerName) formData.append('worker_name', item.workerName);
-    if (item.caption) formData.append('caption', item.caption);
-    if (item.tag) formData.append('tag', item.tag);
-    formData.append('batch_id', item.batchId || 'direct');
+    const formData = UploadPayload.build(item);
 
     return new Promise((resolve, reject) => {
         const xhr = new XMLHttpRequest();
@@ -493,9 +468,9 @@ function doUpload(item) {
             console.log(`[DukeCam] XHR response: ${xhr.status} ${xhr.responseText.substring(0, 200)}`);
             if (xhr.status >= 200 && xhr.status < 300) {
                 try {
-                    resolve(JSON.parse(xhr.responseText));
+                    resolve(UploadPayload.validateAck(item, JSON.parse(xhr.responseText)));
                 } catch (e) {
-                    reject(new Error(`Bad response: ${xhr.responseText.substring(0, 100)}`));
+                    reject(e);
                 }
             } else {
                 reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText.substring(0, 200)}`));
@@ -687,6 +662,7 @@ async function retryItem(id) {
             if (item) {
                 item.status = 'pending';
                 item.retries = 0;
+                item.nextAttemptAt = 0;
                 await dbPut(item);
                 updateQueueItem(id, '', 'Retrying...');
                 processQueue();
@@ -734,5 +710,5 @@ openDB().then(() => {
     console.log(`[DukeCam] DB ready (available=${dbAvailable})`);
     resumePendingUploads();
 }).catch((err) => {
-    console.warn('[DukeCam] DB init failed, direct upload mode:', err);
+    console.warn('[DukeCam] DB init failed, durable queue unavailable:', err);
 });

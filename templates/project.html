@@ -1,4 +1,4 @@
-{{define "title"}}{{.Project.Name}} — DukeCam{{end}}
+{{define "title"}}{{.Project.Name}} — Rad Pad Photos{{end}}
 {{define "header_right"}}<span class="text-sm font-semibold text-white truncate max-w-[180px] sm:max-w-none">{{.Project.Name}}</span>{{end}}
 
 {{define "content"}}
@@ -9,7 +9,7 @@
     <!-- Worker Picker -->
     <div class="mb-4">
         <label for="worker-select" class="block text-sm font-semibold text-duke-dark mb-1.5">
-            Who are you? <span class="font-normal text-gray-400 text-xs">(optional)</span>
+            Photo label <span class="font-normal text-gray-400 text-xs">(upload identity is verified by Tailscale)</span>
         </label>
         <select id="worker-select" onchange="workerChanged()"
                 class="w-full px-3 py-3 border-2 border-gray-200 rounded-lg text-base bg-white focus:border-duke-teal focus:outline-none appearance-auto">
@@ -52,7 +52,7 @@
 
     <!-- Capture row — matches the inspection page: live camera + bulk roll import -->
     <div class="grid grid-cols-2 gap-2 mb-3">
-        <button onclick="takePhotos()"
+        <button id="take-photos-button" onclick="takePhotos()"
                 class="py-4 bg-duke-teal text-white text-sm font-bold rounded-xl shadow-lg cursor-pointer active:bg-duke-dark transition-colors flex items-center justify-center gap-1.5">
             📷 Take Photos
         </button>
@@ -61,7 +61,7 @@
             🖼️ Add from Roll
         </label>
     </div>
-    <p class="text-[11px] text-gray-400 text-center mb-3">Take Photos = live camera · Add from Roll = pick many from your gallery</p>
+    <p class="text-[11px] text-gray-400 text-center mb-3">Take Photos = phone camera · Add from Roll = pick many from your gallery</p>
     <input type="file" id="file-input" accept="image/*" multiple class="file-input-ios">
     <input type="file" id="camera-input" accept="image/*" capture="environment" class="file-input-ios">
 
@@ -69,7 +69,7 @@
     <div id="drop-area"
          class="hidden border-2 border-dashed border-gray-200 rounded-xl py-4 px-4 text-center mb-3">
         <p class="text-sm text-gray-400">or drag &amp; drop files here</p>
-        <div class="text-xs text-gray-400 mt-0.5">JPG, PNG, HEIC, WEBP • Max 50MB each</div>
+        <div class="text-xs text-gray-400 mt-0.5">JPG and PNG only during pilot • Max 50MB each</div>
     </div>
 
     <!-- Upload Status -->
@@ -126,34 +126,6 @@
     {{end}}
 </div>
 
-<!-- Camera Overlay -->
-<div id="camera-overlay" class="fixed inset-0 bg-black z-[900] flex-col" style="display:none">
-    <!-- Top bar -->
-    <div class="flex items-center px-4 py-3 bg-black/80 text-white gap-3 z-10">
-        <button onclick="closeCamera()" class="bg-transparent border-none text-white text-3xl cursor-pointer p-1">✕</button>
-        <span id="shot-counter" class="text-lg font-bold">0 shots</span>
-        <div class="flex-1"></div>
-        <button onclick="flipCamera()" class="bg-white/20 rounded-full w-10 h-10 flex items-center justify-center text-xl">🔄</button>
-    </div>
-    <!-- Viewfinder -->
-    <div class="flex-1 flex items-center justify-center overflow-hidden bg-black">
-        <video id="camera-video" playsinline muted autoplay class="w-full h-full object-cover"></video>
-    </div>
-    <!-- Flash overlay -->
-    <div id="camera-flash-el" class="fixed inset-0 bg-white pointer-events-none z-[910]" style="opacity:0"></div>
-    <!-- Bottom bar -->
-    <div class="bg-black/80 px-4 py-3">
-        <div id="thumb-strip" class="thumb-strip flex gap-2 overflow-x-auto pb-3 mb-3" style="min-height:60px"></div>
-        <div class="flex justify-center">
-            <button onclick="capturePhoto()" id="shutter-btn"
-                    class="w-20 h-20 rounded-full border-4 border-white bg-white/20 active:bg-white/50 transition-colors flex items-center justify-center">
-                <div class="w-16 h-16 rounded-full bg-white"></div>
-            </button>
-        </div>
-    </div>
-    <canvas id="camera-canvas" class="hidden"></canvas>
-</div>
-
 <!-- Lightbox -->
 <div class="lightbox fixed inset-0 bg-black/95 z-[1000] flex-col" id="lightbox">
     <div class="flex items-center px-4 py-3 text-white gap-3">
@@ -162,10 +134,10 @@
             <div class="text-[15px] font-semibold" id="lb-caption"></div>
             <div class="text-xs text-gray-400" id="lb-meta"></div>
         </div>
-        <button onclick="rotateCurrentPhoto('ccw')" title="Rotate left" class="px-2.5 py-1.5 bg-white/20 rounded-lg text-sm hover:bg-white/30 transition-colors">↺</button>
-        <button onclick="rotateCurrentPhoto('cw')" title="Rotate right" class="px-2.5 py-1.5 bg-white/20 rounded-lg text-sm hover:bg-white/30 transition-colors">↻</button>
+        <button hidden style="display:none" onclick="rotateCurrentPhoto('ccw')" title="Rotate left" class="px-2.5 py-1.5 bg-white/20 rounded-lg text-sm hover:bg-white/30 transition-colors">↺</button>
+        <button hidden style="display:none" onclick="rotateCurrentPhoto('cw')" title="Rotate right" class="px-2.5 py-1.5 bg-white/20 rounded-lg text-sm hover:bg-white/30 transition-colors">↻</button>
         <button onclick="toggleLightboxEdit()" id="lb-edit-btn" class="px-3 py-1.5 bg-white/20 rounded-lg text-sm font-semibold hover:bg-white/30 transition-colors">Edit</button>
-        <button id="lb-delete-btn" onclick="deleteCurrentPhoto()" title="Delete photo" class="px-3 py-1.5 bg-red-600/80 rounded-lg text-sm font-semibold hover:bg-red-600 transition-colors disabled:opacity-50">Delete</button>
+        <button hidden style="display:none" id="lb-delete-btn" onclick="deleteCurrentPhoto()" title="Delete photo" class="px-3 py-1.5 bg-red-600/80 rounded-lg text-sm font-semibold hover:bg-red-600 transition-colors disabled:opacity-50">Delete</button>
     </div>
     <!-- Edit Panel -->
     <div id="lb-edit-panel" class="hidden px-4 py-3 bg-gray-900 border-b border-gray-700">
@@ -349,28 +321,34 @@
 
     if (cameraInput) {
         cameraInput.addEventListener('change', function() {
-            if (this.files.length > 0) handleFiles(this.files);
+            if (this.files.length > 0) handleFiles(this.files, this);
         });
     }
     if (fileInput) {
         fileInput.addEventListener('change', function() {
-            if (this.files.length > 0) handleFiles(this.files);
+            if (this.files.length > 0) handleFiles(this.files, this);
         });
     }
 
-    // Camera return fallback (Android)
-    document.addEventListener('visibilitychange', function() {
-        if (document.visibilityState === 'visible' && cameraInput) {
-            setTimeout(function() {
-                if (cameraInput.files && cameraInput.files.length > 0) {
-                    handleFiles(cameraInput.files);
-                }
-            }, 500);
-        }
-    });
+    var fileEnqueueInFlight = false;
 
-    function handleFiles(files) {
+    function setCaptureBusy(busy) {
+        ['camera-input', 'file-input', 'take-photos-button'].forEach(function(id) {
+            var control = document.getElementById(id);
+            if (control) control.disabled = busy;
+        });
+        var area = document.getElementById('drop-area');
+        if (area) area.setAttribute('aria-disabled', busy ? 'true' : 'false');
+    }
+
+    function handleFiles(files, sourceInput) {
         if (!files || files.length === 0) return;
+        if (fileEnqueueInFlight) {
+            showStatus('Saving the previous selection. These new photos were not queued. Keep them and select them again when saving finishes.', 'error');
+            return;
+        }
+        fileEnqueueInFlight = true;
+        setCaptureBusy(true);
 
         var info = getWorkerInfo();
         if (!info.workerId && !info.workerName) {
@@ -386,10 +364,10 @@
         // 3..N on a large batch.
         var pu = captureTags();
         enqueueFiles(files, PROJECT_ID, info.workerId, info.workerName, caption, activeTag, pu.buildingId, pu.unitId, pu.scope)
-            .finally(function() {
-                document.getElementById('camera-input').value = '';
-                document.getElementById('file-input').value = '';
-            });
+            .then(function() {
+                if (sourceInput && sourceInput.files === files) sourceInput.value = '';
+            }).catch(function(err) { showStatus(err.message || 'Could not safely queue photos. Keep the originals and retry.', 'error'); })
+            .finally(function() { fileEnqueueInFlight = false; setCaptureBusy(false); });
     }
 
     function showStatus(msg, type) {
@@ -665,146 +643,18 @@
             });
     }
 
-    // ─── Rapid-Shoot Camera ────────────────────────────
-    var cameraStream = null;
-    var shotCount = 0;
-    var useFrontCamera = false;
-
-    function hasGetUserMedia() {
-        return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-    }
-
-    // Unified capture entry (matches inspection's "Take Photos"): live-camera
-    // burst where getUserMedia is available, else the native camera app.
+    // Pilot capture uses the native camera/file input. Its selection remains
+    // available when durable enqueueing fails; volatile canvas capture is disabled.
     function takePhotos() {
-        if (hasGetUserMedia()) { openCamera(); }
-        else { document.getElementById('camera-input').click(); }
-    }
-
-    function openCamera() {
-        var overlay = document.getElementById('camera-overlay');
-        overlay.style.display = 'flex';
-        document.body.style.overflow = 'hidden';
-        shotCount = 0;
-        document.getElementById('shot-counter').textContent = '0 shots';
-        document.getElementById('thumb-strip').innerHTML = '';
-        startCameraStream();
-    }
-
-    function closeCamera() {
-        stopCameraStream();
-        document.getElementById('camera-overlay').style.display = 'none';
-        document.body.style.overflow = '';
-    }
-
-    function startCameraStream() {
-        var constraints = {
-            video: {
-                facingMode: useFrontCamera ? 'user' : 'environment',
-                width: { ideal: 1920 },
-                height: { ideal: 1080 }
-            },
-            audio: false
-        };
-        navigator.mediaDevices.getUserMedia(constraints).then(function(stream) {
-            cameraStream = stream;
-            var video = document.getElementById('camera-video');
-            video.srcObject = stream;
-            video.play();
-        }).catch(function(err) {
-            console.error('[DukeCam] Camera error:', err);
-            showToast('Camera access denied', 'error');
-            closeCamera();
-        });
-    }
-
-    function stopCameraStream() {
-        if (cameraStream) {
-            cameraStream.getTracks().forEach(function(t) { t.stop(); });
-            cameraStream = null;
+        if (fileEnqueueInFlight) {
+            showStatus('Please wait until the current photos have been saved before taking another photo.', 'hint');
+            return;
         }
-        var video = document.getElementById('camera-video');
-        video.srcObject = null;
-    }
-
-    function flipCamera() {
-        useFrontCamera = !useFrontCamera;
-        stopCameraStream();
-        startCameraStream();
-    }
-
-    function capturePhoto() {
-        var video = document.getElementById('camera-video');
-        var canvas = document.getElementById('camera-canvas');
-        if (!video.videoWidth) return;
-
-        var vw = video.videoWidth;
-        var vh = video.videoHeight;
-
-        // Detect orientation mismatch: if the device is in portrait but the
-        // video stream is landscape (or vice versa), the browser is applying
-        // display rotation that canvas.drawImage won't capture. We need to
-        // manually rotate the canvas to match what the user sees.
-        var angle = screen.orientation ? screen.orientation.angle : (window.orientation || 0);
-        var isDevicePortrait = (angle % 180 === 0);
-        var isVideoLandscape = (vw > vh);
-        var needsRotation = isDevicePortrait && isVideoLandscape;
-
-        var ctx;
-        if (needsRotation) {
-            // Swap canvas dimensions for portrait output
-            canvas.width = vh;
-            canvas.height = vw;
-            ctx = canvas.getContext('2d');
-            if (angle === 0) {
-                // Standard portrait: rotate 90° CW
-                ctx.translate(canvas.width, 0);
-                ctx.rotate(Math.PI / 2);
-            } else {
-                // Upside-down portrait (180°): rotate 90° CCW
-                ctx.translate(0, canvas.height);
-                ctx.rotate(-Math.PI / 2);
-            }
-        } else {
-            canvas.width = vw;
-            canvas.height = vh;
-            ctx = canvas.getContext('2d');
-        }
-        ctx.drawImage(video, 0, 0);
-
-        // Flash effect
-        var flash = document.getElementById('camera-flash-el');
-        flash.style.opacity = '0.8';
-        flash.classList.remove('camera-flash');
-        void flash.offsetWidth;
-        flash.classList.add('camera-flash');
-
-        canvas.toBlob(function(blob) {
-            if (!blob) return;
-            var filename = 'rapid-' + Date.now() + '.jpg';
-            var file = new File([blob], filename, { type: 'image/jpeg' });
-
-            var info = getWorkerInfo();
-            var caption = document.getElementById('caption').value.trim();
-            var pu = captureTags();
-            enqueueFiles([file], PROJECT_ID, info.workerId, info.workerName, caption, activeTag, pu.buildingId, pu.unitId, pu.scope);
-
-            // Update counter
-            shotCount++;
-            document.getElementById('shot-counter').textContent = shotCount + ' shot' + (shotCount === 1 ? '' : 's');
-
-            // Add thumbnail to strip
-            var strip = document.getElementById('thumb-strip');
-            var thumb = document.createElement('img');
-            thumb.src = URL.createObjectURL(blob);
-            thumb.className = 'w-14 h-14 rounded-lg object-cover flex-shrink-0';
-            strip.appendChild(thumb);
-            strip.scrollLeft = strip.scrollWidth;
-        }, 'image/jpeg', 0.92);
+        document.getElementById('camera-input').click();
     }
 
     // ─── Feature Detection ─────────────────────────────
-    // (Take Photos routes to the live camera via takePhotos(); no separate button to reveal.)
+    // Native camera capture is used throughout this pilot.
     // Show drag-drop zone on desktop (non-touch or wide screen)
     if (!('ontouchstart' in window) || window.innerWidth >= 768) {
         document.getElementById('drop-area').classList.remove('hidden');
