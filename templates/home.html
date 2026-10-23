@@ -1,4 +1,4 @@
-{{define "title"}}DukeCam{{end}}
+{{define "title"}}Rad Pad Photos{{end}}
 
 {{define "header_right"}}<a href="/admin" class="text-duke-light hover:text-white transition-colors">Admin</a>{{end}}
 
@@ -10,7 +10,7 @@
                 class="flex-1 py-3 text-center text-sm font-semibold transition-colors border-b-2 border-duke-teal text-duke-dark">
             📷 Projects
         </button>
-        <button id="tab-btn-inspections" onclick="switchTab('inspections')"
+        <button hidden style="display:none" id="tab-btn-inspections" onclick="switchTab('inspections')"
                 class="flex-1 py-3 text-center text-sm font-semibold transition-colors border-b-2 border-transparent text-gray-400 hover:text-gray-600">
             📋 Inspections
         </button>
@@ -69,7 +69,7 @@
         </div>
 
         <!-- Share button -->
-        <div onclick="event.preventDefault(); event.stopPropagation(); copyShareLink('{{$ps.Project.Slug}}', '{{$ps.Project.Name}}')"
+        <div hidden style="display:none" onclick="event.preventDefault(); event.stopPropagation(); copyShareLink('{{$ps.Project.Slug}}', '{{$ps.Project.Name}}')"
              class="flex-shrink-0 w-10 h-10 flex items-center justify-center border-2 border-gray-200 rounded-lg text-lg cursor-pointer hover:border-duke-teal transition-colors">
             🔗
         </div>
@@ -206,7 +206,7 @@
 </div><!-- /inspection-list -->
 
 <!-- New Inspection FAB -->
-<a href="/inspections/new"
+<a hidden style="display:none" href="/inspections/new"
    class="fixed bottom-6 right-6 w-14 h-14 bg-duke-teal hover:bg-duke-dark text-white rounded-full shadow-lg flex items-center justify-center transition-colors z-30">
     <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
 </a>

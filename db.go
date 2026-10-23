@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -322,6 +323,9 @@ func (db *DB) GetProjectByID(ctx context.Context, id int) (*Project, error) {
 }
 
 func (db *DB) CreateProject(ctx context.Context, name, slug string, address, description *string) (*Project, error) {
+	if !validProjectSlug(slug) {
+		return nil, fmt.Errorf("invalid project slug")
+	}
 	var p Project
 	err := db.pool.QueryRow(ctx, `
 		INSERT INTO projects (name, slug, address, description)
@@ -621,7 +625,15 @@ func (db *DB) GetPhotosForProjectPaginated(ctx context.Context, projectID, offse
 }
 
 func (db *DB) InsertPhoto(ctx context.Context, p *Photo) error {
-	return db.pool.QueryRow(ctx, `
+	return insertPhotoQuery(ctx, db.pool, p)
+}
+
+type photoQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func insertPhotoQuery(ctx context.Context, q photoQuerier, p *Photo) error {
+	return q.QueryRow(ctx, `
 		INSERT INTO photos (
 			project_id, worker_id, worker_name_override, filename,
 			original_filename, caption, tag, lat, lng, taken_at,
@@ -638,8 +650,11 @@ func (db *DB) InsertPhoto(ctx context.Context, p *Photo) error {
 }
 
 func (db *DB) GetPhotoByID(ctx context.Context, id int) (*Photo, error) {
+	return getPhotoQuery(ctx, db.pool, id)
+}
+func getPhotoQuery(ctx context.Context, q photoQuerier, id int) (*Photo, error) {
 	var p Photo
-	err := db.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 		SELECT id, project_id, worker_id, worker_name_override, filename,
 		       original_filename, caption, tag, lat, lng, taken_at, uploaded_at,
 		       file_size, width, height, storage_path, thumb_path, upload_batch

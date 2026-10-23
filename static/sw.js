@@ -8,7 +8,9 @@
  * - Background Sync API for inspection data + photo uploads
  */
 
-const SW_VERSION = '2.2.0';
+importScripts('/static/js/upload-payload.js?v=1');
+
+const SW_VERSION = '3.0.0';
 const CACHE_NAME = `dukecam-v${SW_VERSION}`;
 
 // App shell — precached on install. upload.js carries an explicit version
@@ -16,17 +18,16 @@ const CACHE_NAME = `dukecam-v${SW_VERSION}`;
 // cache entry is keyed on the old query string and gets evicted with the
 // old CACHE_NAME on activate).
 const PRECACHE_URLS = [
-    '/',
     '/static/js/tailwind.js',
     '/static/js/htmx.min.js',
-    '/static/js/upload.js?v=7',
+    '/static/js/upload.js?v=8',
+    '/static/js/upload-payload.js?v=1',
     '/static/js/inspection-offline.js',
     '/static/js/inspection_sync.js',
     '/static/img/tduke-logo.png',
     '/static/img/tduke-favicon.jpg',
     '/static/img/icon-512.png',
     '/static/manifest.json',
-    '/offline',
 ];
 
 // ─── Install: Precache App Shell ────────────────────────────────
@@ -80,33 +81,9 @@ self.addEventListener('fetch', (event) => {
         return;
     }
 
-    // Media (photos/thumbs): Cache-first with network fallback
-    if (url.pathname.startsWith('/media/')) {
-        event.respondWith(cacheFirst(request));
-        return;
-    }
+    // Job HTML and private media always require a live authorization check.
+    // Only public static assets may enter the service-worker cache.
 
-    // Inspection photos: Cache-first
-    if (url.pathname.match(/^\/api\/inspections\/photos\//)) {
-        event.respondWith(cacheFirst(request));
-        return;
-    }
-
-    // HTML pages: Network-first with cache fallback, then offline page
-    if (request.headers.get('Accept')?.includes('text/html') ||
-        url.pathname === '/' ||
-        url.pathname.startsWith('/p/') ||
-        url.pathname.startsWith('/share/') ||
-        url.pathname.startsWith('/admin') ||
-        url.pathname.startsWith('/inspection') ||
-        url.pathname === '/why' ||
-        url.pathname === '/offline') {
-        event.respondWith(networkFirstPage(request));
-        return;
-    }
-
-    // Everything else: Network-first
-    event.respondWith(networkFirst(request));
 });
 
 /**
@@ -215,37 +192,24 @@ async function doPhotoUploadSync() {
         const pending = await getByIndex(db, 'upload_queue', 'status', 'pending');
         console.log(`[SW] Photo upload sync: ${pending.length} pending`);
 
+        let deferred = false;
         for (const item of pending) {
             try {
-                const formData = new FormData();
-                const blob = new Blob([item.data], { type: item.type || 'image/jpeg' });
-                formData.append('file', blob, item.filename);
-                if (item.project) formData.append('project', item.project);
-                if (item.worker) formData.append('worker', item.worker);
-                if (item.caption) formData.append('caption', item.caption);
-                if (item.tag) formData.append('tag', item.tag);
-                if (item.buildingId) formData.append('building_id', item.buildingId);
-                if (item.unitId) formData.append('unit_id', item.unitId);
-                if (item.scope) formData.append('scope', item.scope);
-                if (item.lat) formData.append('lat', item.lat);
-                if (item.lng) formData.append('lng', item.lng);
-
+                if (item.nextAttemptAt && item.nextAttemptAt > Date.now()) { deferred = true; continue; }
                 const resp = await fetch('/api/upload', {
                     method: 'POST',
-                    body: formData,
+                    body: UploadPayload.build(item),
                 });
-
-                if (resp.ok) {
-                    item.status = 'uploaded';
-                    item.data = null; // Free memory
-                    await putItem(db, 'upload_queue', item);
-                }
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                UploadPayload.validateAck(item, await resp.json());
+                await deleteItem(db, 'upload_queue', item.id);
             } catch (err) {
                 console.error(`[SW] Photo upload failed: ${item.id}`, err);
-                item.retries = (item.retries || 0) + 1;
-                await putItem(db, 'upload_queue', item);
+                // Never overwrite a record another uploader may already have acknowledged.
+                throw err; // Let Background Sync retry; durable bytes remain untouched.
             }
         }
+        if (deferred) throw new Error('Photo uploads deferred until retry deadline');
     } finally {
         db.close();
     }
@@ -487,4 +451,14 @@ function arrayBufferToBase64(buffer) {
         binary += String.fromCharCode.apply(null, chunk);
     }
     return btoa(binary);
+}
+
+function deleteItem(db, storeName, id) {
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error || new Error('Queue transaction aborted'));
+    });
 }

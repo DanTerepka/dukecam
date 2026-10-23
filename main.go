@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 
 // Config holds all application configuration from environment variables.
 type Config struct {
+	PilotOrigin     string
+	PilotAdmins     []string
+	SocketPath      string
 	DatabaseURL     string
 	StoragePath     string
 	ThumbPath       string
@@ -60,21 +64,32 @@ func loadConfig() Config {
 		}
 		maxMB = v
 	}
-	return Config{
-		DatabaseURL: getEnv("DATABASE_URL", "postgres://trevor@localhost:5432/dukecam"),
-		StoragePath: getEnv("STORAGE_PATH", "/data/photos"),
-		ThumbPath:   getEnv("THUMB_PATH", "/data/thumbs"),
-		BaseURL:     getEnv("BASE_URL", "https://dukecam.thomasduke.io"),
-		MaxUploadMB: maxMB,
-		Port:        port,
+	cfg := Config{
+		PilotOrigin:     os.Getenv("RADPAD_ORIGIN"),
+		PilotAdmins:     strings.Split(os.Getenv("RADPAD_ADMINS"), ","),
+		SocketPath:      os.Getenv("RADPAD_SOCKET_PATH"),
+		DatabaseURL:     getEnv("DATABASE_URL", "postgres://trevor@localhost:5432/dukecam"),
+		StoragePath:     getEnv("STORAGE_PATH", "/data/photos"),
+		ThumbPath:       getEnv("THUMB_PATH", "/data/thumbs"),
+		BaseURL:         getEnv("BASE_URL", "https://dukecam.thomasduke.io"),
+		MaxUploadMB:     maxMB,
+		Port:            port,
 		FyxtURL:         getEnv("FYXT_URL", "https://open.apifyxt.com"),
 		FyxtAPIKey:      getEnv("FYXT_API_KEY", ""),
 		FyxtSchema:      getEnv("FYXT_SCHEMA", "thomasduke"),
-		PropertyOSURL:   getEnv("PROPERTYOS_URL", "http://localhost:4125"),
+		PropertyOSURL:   getEnv("PROPERTYOS_URL", ""),
 		PropertyOSToken: getEnv("PROPERTYOS_TOKEN", ""),
 		IngestToken:     getEnv("DUKECAM_INGEST_TOKEN", ""),
 		POSDatabaseURL:  getEnv("POS_DB_URL", ""),
 	}
+	if path := os.Getenv("DATABASE_URL_FILE"); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			log.Fatal("cannot read database secret file")
+		}
+		cfg.DatabaseURL = strings.TrimSpace(string(b))
+	}
+	return cfg
 }
 
 func getEnv(key, fallback string) string {
@@ -85,13 +100,12 @@ func getEnv(key, fallback string) string {
 }
 
 func (a *App) registerRoutes(e *echo.Echo) {
+	// Echo 4.16 appends '*' literally; the slash is required to keep the
+	// registered path aligned with the access-control route allowlist.
+	e.Static("/static/", "static")
 	// Health check (used by offline sync heartbeat)
-	e.GET("/api/health", func(c echo.Context) error {
-		return c.NoContent(204)
-	})
-	e.HEAD("/api/health", func(c echo.Context) error {
-		return c.NoContent(204)
-	})
+	e.GET("/api/health", a.PilotHealth)
+	e.HEAD("/api/health", a.PilotHealth)
 
 	// Pages
 	e.GET("/", a.HomePage)
@@ -142,7 +156,7 @@ func (a *App) registerRoutes(e *echo.Echo) {
 	e.POST("/api/inspections/create", a.CreateInspectionHandler)
 	e.POST("/api/inspections/:id/share", a.GenerateShareLink)
 	e.POST("/api/inspections/submit", a.SubmitInspectionHandler) // JSON — offline sync single submission
-	e.POST("/api/inspections/sync", a.BatchSyncHandler)         // JSON — offline sync batch (idempotent)
+	e.POST("/api/inspections/sync", a.BatchSyncHandler)          // JSON — offline sync batch (idempotent)
 	e.POST("/api/inspections/:id/item/:itemId/status", a.UpdateItemStatusHandler)
 	e.POST("/api/inspections/:id/complete", a.CompleteInspectionHandler)
 	e.POST("/api/inspections/:id/reopen", a.ReopenInspectionHandler)
@@ -170,7 +184,7 @@ func (a *App) registerRoutes(e *echo.Echo) {
 	e.GET("/api/inspections/photos/:id/thumb", a.ServeInspectionPhotoThumb)
 
 	// Inspection Flow API (JSON — for inspector UI + IndexedDB offline cache)
-	e.GET("/api/inspections/filter", a.FilterInspectionsHTML)     // HTMX — filter inspection list by property
+	e.GET("/api/inspections/filter", a.FilterInspectionsHTML) // HTMX — filter inspection list by property
 	e.GET("/api/inspections/properties", a.ListProperties)
 	e.GET("/api/inspections/properties/search", a.SearchPropertiesHTML) // HTMX — returns HTML fragment
 	e.GET("/api/inspections/properties/:id", a.GetPropertyDetail)
@@ -201,16 +215,22 @@ func (a *App) registerRoutes(e *echo.Echo) {
 
 func main() {
 	cfg := loadConfig()
+	if err := validatePilotConfig(cfg); err != nil {
+		log.Fatal(err)
+	}
 
 	// Database
 	db, err := NewDB(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		log.Fatalf("database connection failed: %v", err)
+		log.Fatal("database connection failed; verify private database configuration")
 	}
 	defer db.Close()
 
 	if err := db.CreateTables(context.Background()); err != nil {
 		log.Fatalf("table creation failed: %v", err)
+	}
+	if err := db.CreateUploadReceiptTables(context.Background()); err != nil {
+		log.Fatalf("upload receipt table creation failed: %v", err)
 	}
 	if err := db.CreateInspectionTables(context.Background()); err != nil {
 		log.Fatalf("inspection table creation failed: %v", err)
@@ -236,8 +256,12 @@ func main() {
 	}
 
 	// Ensure storage directories
-	os.MkdirAll(cfg.StoragePath, 0755)
-	os.MkdirAll(cfg.ThumbPath, 0755)
+	if err := os.MkdirAll(cfg.StoragePath, 0750); err != nil {
+		log.Fatal("photo storage unavailable")
+	}
+	if err := os.MkdirAll(cfg.ThumbPath, 0750); err != nil {
+		log.Fatal("thumbnail storage unavailable")
+	}
 
 	// PropertyOS API client (optional — gracefully degrades if not configured)
 	pos := NewPropertyOSClient(PropertyOSConfig{
@@ -270,7 +294,7 @@ func main() {
 
 	// 2 workers on a 4-core box shared with 59 other containers: enough to keep
 	// up with burst uploads without starving request handling.
-	thumbs := NewThumbQueue(2, 256)
+	thumbs := NewThumbQueue(1, 2)
 	defer thumbs.Shutdown()
 
 	app := &App{config: cfg, db: db, fyxt: fyxt, propertyOS: pos, posDB: posDB, thumbs: thumbs}
@@ -284,9 +308,8 @@ func main() {
 		Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
 	}))
 	e.Use(middleware.Recover())
+	e.Use(pilotAccess(cfg.PilotOrigin, cfg.PilotAdmins))
 	e.Use(middleware.BodyLimit(fmt.Sprintf("%dM", cfg.MaxUploadMB)))
-
-	e.Static("/static", "static")
 
 	// Service worker must be served from root for proper scope.
 	// Disable caching: a stale /sw.js at any edge means PWAs can't see
@@ -299,15 +322,25 @@ func main() {
 	})
 
 	app.registerRoutes(e)
+	e.Server.ConnContext = pilotConnectionContext
+	listener, err := listenPilotSocket(cfg.SocketPath)
+	if err != nil {
+		log.Fatal("cannot open private pilot socket")
+	}
+	defer listener.Close()
+	defer os.Remove(cfg.SocketPath)
+	if err := os.Chmod(cfg.SocketPath, 0600); err != nil {
+		log.Fatal("cannot secure pilot socket")
+	}
+	e.Listener = listener
 
 	// Graceful start + shutdown. A real bind failure (port in use, permission)
 	// must crash the process — otherwise it stays alive with no listener and
 	// the container looks "up" while serving nothing. ErrServerClosed is the
 	// expected signal from e.Shutdown below, so it is not fatal.
 	go func() {
-		addr := fmt.Sprintf(":%d", cfg.Port)
-		log.Printf("DukeCam starting on %s", addr)
-		if err := e.Start(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Printf("Rad Pad photo pilot starting on private Unix socket")
+		if err := e.Start(""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("server failed to start: %v", err)
 		}
 	}()

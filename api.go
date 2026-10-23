@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/labstack/echo/v4"
 	qrcode "github.com/skip2/go-qrcode"
 )
@@ -22,6 +23,7 @@ import (
 // upload path (/api/upload) and the PropertyOS ingest path
 // (/api/propertyos/photos). The PropertyOS fields are nil for worker uploads.
 type photoMeta struct {
+	uploadTx   pgx.Tx
 	WorkerID   *int
 	WorkerName string // free-text override when WorkerID is nil
 	Caption    string
@@ -44,6 +46,9 @@ type photoMeta struct {
 // the exact same pipeline.
 func (a *App) storeUploadedPhoto(c echo.Context, project *Project, file *multipart.FileHeader, meta photoMeta) (*Photo, int, string) {
 	ctx := c.Request().Context()
+	if !validProjectSlug(project.Slug) {
+		return nil, 400, "invalid project slug"
+	}
 
 	src, err := file.Open()
 	if err != nil {
@@ -51,7 +56,7 @@ func (a *App) storeUploadedPhoto(c echo.Context, project *Project, file *multipa
 	}
 	defer src.Close()
 
-	data, err := io.ReadAll(src)
+	data, err := io.ReadAll(io.LimitReader(src, int64(a.config.MaxUploadMB)*1024*1024+1))
 	if err != nil {
 		return nil, http.StatusBadRequest, "cannot read file"
 	}
@@ -64,15 +69,9 @@ func (a *App) storeUploadedPhoto(c echo.Context, project *Project, file *multipa
 		return nil, http.StatusBadRequest, "empty file"
 	}
 
-	// Determine file extension
-	ext := strings.ToLower(filepath.Ext(file.Filename))
-	if ext == "" || !isAllowedExt(ext) {
-		ext = ".jpg"
-	}
-	// HEIC/HEIF: decoded to image.Image then saved as JPEG — remap extension so
-	// the stored file is served as a renderable JPEG.
-	if ext == ".heic" || ext == ".heif" {
-		ext = ".jpg"
+	ext, err := validatePilotImage(data)
+	if err != nil {
+		return nil, http.StatusBadRequest, err.Error()
 	}
 
 	processed, err := ProcessUpload(data)
@@ -85,30 +84,9 @@ func (a *App) storeUploadedPhoto(c echo.Context, project *Project, file *multipa
 	photoPath := filepath.Join(a.config.StoragePath, project.Slug, dateDir, uniqueName)
 	thumbPath := filepath.Join(a.config.ThumbPath, project.Slug, dateDir, uniqueName)
 
-	if processed.Processed {
-		thumbQuality := 80
-		if ext == ".png" {
-			thumbQuality = 0
-		}
-		if processed.NeedsTranscode {
-			// HEIC/HEIF must become a JPEG to be servable.
-			if err := SaveImage(processed.Image, photoPath, 95); err != nil {
-				log.Printf("save photo error: %v", err)
-				return nil, http.StatusInternalServerError, "save failed"
-			}
-		} else if err := SaveRaw(data, photoPath); err != nil {
-			// Store the upload byte-for-byte: lossless, and no encode on the
-			// request path.
-			log.Printf("save photo error: %v", err)
-			return nil, http.StatusInternalServerError, "save failed"
-		}
-		a.thumbs.Enqueue(data, thumbPath, thumbQuality)
-	} else {
-		if err := SaveRaw(data, photoPath); err != nil {
-			log.Printf("save raw error: %v", err)
-			return nil, http.StatusInternalServerError, "save failed"
-		}
-		thumbPath = "" // no thumbnail for unprocessable formats
+	if err := saveOriginalAtomic(data, photoPath); err != nil {
+		os.Remove(photoPath)
+		return nil, http.StatusInternalServerError, "save failed"
 	}
 
 	// Validate tag
@@ -170,9 +148,23 @@ func (a *App) storeUploadedPhoto(c echo.Context, project *Project, file *multipa
 		Scope:              meta.Scope,
 	}
 
-	if err := a.db.InsertPhoto(ctx, photo); err != nil {
-		log.Printf("insert photo error: %v", err)
+	var insertErr error
+	if meta.uploadTx != nil {
+		insertErr = insertPhotoQuery(ctx, meta.uploadTx, photo)
+	} else {
+		insertErr = a.db.InsertPhoto(ctx, photo)
+	}
+	if insertErr != nil {
+		os.Remove(photoPath)
+		log.Printf("insert photo error: %v", insertErr)
 		return nil, http.StatusInternalServerError, "database error"
+	}
+	if a.thumbs != nil {
+		quality := 80
+		if ext == ".png" {
+			quality = 0
+		}
+		a.thumbs.Enqueue(data, thumbPath, quality)
 	}
 	return photo, 0, ""
 }
@@ -251,7 +243,7 @@ func (a *App) UploadPhoto(c echo.Context) error {
 
 	log.Printf("upload: project=%s file=%s worker=%v building=%v unit=%v", project.Slug, file.Filename, workerIDStr, buildingID, unitID)
 
-	photo, status, errMsg := a.storeUploadedPhoto(c, project, file, photoMeta{
+	photo, status, errMsg := a.storeIdempotentUpload(c, project, file, photoMeta{
 		WorkerID:   workerID,
 		WorkerName: workerName,
 		Caption:    caption,
@@ -268,9 +260,10 @@ func (a *App) UploadPhoto(c echo.Context) error {
 	log.Printf("upload complete: id=%d file=%s project=%s", photo.ID, photo.Filename, project.Slug)
 
 	return c.JSON(http.StatusOK, map[string]interface{}{
-		"id":       photo.ID,
-		"filename": photo.Filename,
-		"status":   "ok",
+		"id":               photo.ID,
+		"client_upload_id": c.FormValue("client_upload_id"),
+		"filename":         photo.Filename,
+		"status":           "ok",
 	})
 }
 
